@@ -1,0 +1,116 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Model Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# Strategy: Direct Multi-Step (DMS) forecasting.
+#
+# One XGBoost model is trained per forecast horizon h ∈ {1, …, 24}.
+# Each model predicts ŷ(t+h) = f_h(X_t), where X_t is the feature vector
+# at decision time t (no future information leakage).
+#
+# Why DMS over Recursive?
+#   - Recursive feeding of predicted values propagates forecast errors.
+#   - DMS gives each horizon its own independently optimal model.
+#   - For tropical solar (strong diurnal periodicity), DMS consistently
+#     outperforms recursive in the literature.
+#
+# Cross-repo note: horizon numbering and target column naming (pv_ac_W,
+# target_h1 … target_h24) are kept compatible with solar-generation-forecasting.
+
+forecasting:
+  n_horizons: 24             # h+1 … h+24 (hours ahead)
+  target_col: "pv_ac_W"     # canonical target column name (shared across repos)
+  temporal_resolution: "1h" # model operates at hourly resolution
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XGBoost Hyperparameters
+# ─────────────────────────────────────────────────────────────────────────────
+# Reasonable defaults for a ~1-year training set.  Run a grid search or
+# Optuna study to tune for production use.
+
+xgboost:
+  n_estimators: 500
+  max_depth: 6
+  learning_rate: 0.05
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_child_weight: 5
+  reg_alpha: 0.1             # L1 regularisation
+  reg_lambda: 1.0            # L2 regularisation
+  objective: "reg:squarederror"
+  eval_metric: "rmse"
+  early_stopping_rounds: 50
+  random_state: 42
+  n_jobs: -1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Train / Validation / Test split (chronological, no shuffle)
+# ─────────────────────────────────────────────────────────────────────────────
+split:
+  train_frac: 0.70
+  val_frac: 0.15
+  # test_frac is implicitly 1 - train_frac - val_frac = 0.15
+  gap_hours: 24              # gap between splits to prevent leakage via lags
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LSTM Residual Correction Model
+# ─────────────────────────────────────────────────────────────────────────────
+# Trained on the 1-year real/synthetic overlap to learn site-specific losses.
+# Input:  24-hour sequence of [ghi, air_temp, relative_humidity, cloud_opacity,
+#         clearness_index, pvlib_ac_kw, hour_sin, hour_cos]  (8 features)
+# Output: scalar residual at the current hour
+
+lstm_residual:
+  seq_len: 24                # hours of past context fed to the LSTM
+  hidden_size: 32
+  n_layers: 2
+  dropout: 0.2
+  batch_size: 64
+  n_epochs: 100
+  learning_rate: 0.001
+  early_stopping_patience: 15
+  random_state: 42
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LSTM 24h-Ahead Forecaster
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-trained on 4-year corrected synthetic PV.
+# Fine-tuned on 1-year real PV at a lower learning rate.
+#
+# Input:  24-hour sequence of [pv_ac_norm, pvlib_ac_norm, ghi_norm,
+#         air_temp_norm, relative_humidity_norm, cloud_opacity_norm,
+#         clearness_index_norm, hour_sin, hour_cos]  (9 features)
+# Output: 24 hourly PV predictions (MIMO — all horizons at once)
+
+lstm_forecaster:
+  seq_len: 48                # hours of past observations as encoder input (2 days)
+  n_horizons: 24             # forecast output length (must match forecasting.n_horizons)
+  hidden_size: 64
+  n_layers: 2
+  dropout: 0.2
+  batch_size: 64
+  n_epochs_pretrain: 100     # epochs on 4-year corrected synthetic data
+  n_epochs_finetune: 30      # epochs on 1-year real PV
+  n_epochs_direct: 20        # epochs for direct synthetic-only training (no finetune)
+  lr_pretrain: 0.001
+  lr_finetune: 0.0001        # 10× lower — prevents catastrophic forgetting
+  lr_direct: 0.001           # learning rate for direct synthetic training
+  early_stopping_patience: 15
+  random_state: 42
+  daytime_weight: 3.0          # loss weight multiplier for daytime horizons (pv_ac_norm > 0.05)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hybrid Forecaster (XGBoost DMS + LSTM, heterogeneous parallel)
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-horizon-group blending: one alpha per group optimised on validation set.
+#   short: h=1..8   (LSTM sequence context strongest here)
+#   mid:   h=9..16  (blend transitions)
+#   long:  h=17..24 (forecast weather + previous-day features dominate)
+
+hybrid_forecaster:
+  alpha_init: 0.5
+  optimize_alpha: true       # grid-search alpha ∈ [0, 1] per group
+  alpha_grid_steps: 21       # 0.00, 0.05, 0.10, …, 1.00
+  horizon_groups:
+    short: [1, 8]
+    mid:   [9, 16]
+    long:  [17, 24]

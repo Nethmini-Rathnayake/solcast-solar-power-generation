@@ -1,66 +1,257 @@
 # Solcast-Based Solar PV Forecasting for Microgrid Control
 
+A hybrid solar PV forecasting system combining site-level irradiance inputs,
+physics-based PV modelling, time-series feature engineering, and machine
+learning — designed to support cost-optimised microgrid energy management.
+
+---
+
 ## Overview
 
-This project develops a high-resolution solar PV forecasting pipeline for a cost-optimized microgrid controller. The forecasting module is designed to predict future PV generation so that a microgrid energy management system can schedule available resources such as battery storage, diesel generation, and grid power at minimum operating cost.
+This repository builds a production-quality solar PV forecasting pipeline for
+the **University of Moratuwa Smartgrid Lab** microgrid.
 
-Unlike coarse satellite/reanalysis sources, this version of the project uses **Solcast** as the primary weather and irradiance data source. Solcast provides higher spatial and temporal resolution, making it more suitable for capturing site-level irradiance variability, cloud-driven ramps, and wet-season fluctuations.
+In a microgrid, accurate forecasts of solar generation allow the energy
+management system to schedule dispatchable resources — battery storage, diesel
+generation, and grid import/export — at minimum cost.  This pipeline supplies
+those forecasts.
 
-The forecasting pipeline combines:
+**Primary external data source: Solcast**
 
-- **Local measured PV plant data**
-- **Solcast irradiance and meteorological data**
-- **Physics-based PV simulation using pvlib**
-- **Feature engineering for time series forecasting**
-- **Machine learning models for multi-horizon prediction**
+Unlike coarse reanalysis sources (e.g. NASA POWER), Solcast provides
+satellite-derived irradiance at 5-minute resolution with high site-level
+accuracy, making it well-suited for:
+- capturing cloud-driven generation ramps
+- wet-season variability analysis
+- high-resolution sub-hourly feature engineering
 
----
-
-## Motivation
-
-In a microgrid, solar generation is highly variable and depends strongly on weather conditions. To optimize cost in real time, the controller requires accurate forecasts of PV output.
-
-The original version of the project used NASA POWER as the primary external data source due to its long historical coverage. However, NASA POWER has relatively coarse spatial resolution and is less effective at capturing local cloud motion and rapid irradiance changes.
-
-Since this project now has access to more than three years of Solcast data, Solcast becomes a stronger primary source because it offers:
-
-- better site-level relevance
-- higher temporal resolution
-- improved cloud-sensitive irradiance estimation
-- better representation of local wet-season variability
+See also the companion repository for a NASA POWER-based pipeline:
+[solar-generation-forecasting](https://github.com/NethminiRathnayake/solar-generation-forecasting)
+(shared evaluation metrics and compatible feature naming).
 
 ---
 
-## Objectives
+## System
 
-The main objectives of this repository are:
-
-1. Build a Solcast-driven PV forecasting pipeline
-2. Align Solcast weather data with local measured PV output
-3. Generate realistic PV power estimates using physics-based modeling
-4. Engineer forecasting features from weather, time, and historical PV behavior
-5. Train machine learning models for short-term and day-ahead PV forecasting
-6. Support a cost-optimized microgrid controller with accurate solar predictions
+| Property | Value |
+|---|---|
+| Site | University of Moratuwa, Sri Lanka |
+| Coordinates | 6.7912°N, 79.9005°E |
+| Timezone | Asia/Colombo (UTC+5:30) |
+| Installed capacity | ~350 kWp (estimated; 3 sub-arrays, 8 inverters) |
+| Peak observed AC output | ~295 kW |
+| Local data resolution | 5-minute |
+| Local data coverage | April 2022 – April 2023 |
+| Solcast data resolution | 5-minute |
+| Solcast data coverage | January 2020 – February 2024 |
 
 ---
 
-## Pipeline
+## Forecasting Approach
 
-```text
-Local PV Data
-        +
-Solcast Weather/Irradiance Data
-        ↓
-Data Cleaning and Time Alignment
-        ↓
-Calibration / Validation
-        ↓
-Physics-Based PV Simulation
-        ↓
-Feature Engineering
-        ↓
-Forecast Model Training
-        ↓
-PV Generation Forecast
-        ↓
-Microgrid Optimization Input
+```
+                    ┌──────────────────────────┐
+                    │   Local PV Plant Data     │
+                    │   (5-min, 2022–2023)      │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │   Solcast Weather Data    │
+                    │   (5-min, 2020–2024)      │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  Timestamp Alignment      │
+                    │  (inner join, 5-min)      │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  Data Cleaning            │
+                    │  (overflow, bounds,       │
+                    │   interpolation)          │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  pvlib Simulation         │
+                    │  (PVWatts, Faiman temp,   │
+                    │   POA via Perez)          │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  5-min → Hourly           │
+                    │  Aggregation              │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  Feature Engineering      │
+                    │  · Time / solar position  │
+                    │  · Solcast weather ratios │
+                    │  · pvlib residual         │
+                    │  · Lag features (h-1…168) │
+                    │  · Rolling statistics     │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  XGBoost DMS Forecaster   │
+                    │  (24 models, h+1…h+24)    │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  PV Generation Forecast   │
+                    │  (hourly, 24h ahead)      │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  Microgrid Optimisation   │
+                    │  (cost scheduling)        │
+                    └──────────────────────────┘
+```
+
+### Physics-first design
+
+A pvlib PVWatts simulation is run on Solcast irradiance inputs to produce a
+deterministic physics baseline.  The ML model then learns to correct the
+gap between the physics simulation and real measurements — the **pvlib
+residual** — which encodes systematic losses from soiling, shading, inverter
+clipping, and wet-season cloud variability.
+
+This approach is more physically grounded and generalisable than a black-box
+regression, and is easier to interpret in a research or viva context.
+
+---
+
+## Repository Structure
+
+```
+solcast-solar-power-generation/
+├── configs/
+│   ├── site.yaml          # Site coordinates, pvlib parameters
+│   ├── model.yaml         # XGBoost hyperparameters, horizon settings
+│   └── pipeline.yaml      # Data paths, cleaning thresholds, feature switches
+│
+├── data/
+│   ├── raw/               # Local PV plant CSV (not committed to Git)
+│   ├── external/          # Solcast CSV files (not committed to Git)
+│   ├── interim/           # Cleaned 5-min parquet (generated)
+│   └── processed/         # Hourly feature matrix parquet (generated)
+│
+├── src/
+│   ├── utils/             # config.py, logger.py
+│   ├── data/              # local_pv.py, solcast.py, alignment.py
+│   ├── preprocessing/     # cleaning.py
+│   ├── physics/           # pvlib_model.py
+│   ├── features/          # aggregation.py, time_features.py,
+│   │                      # weather_features.py, physics_features.py,
+│   │                      # lag_features.py
+│   ├── models/            # baseline.py, gradient_boost.py, train.py
+│   └── evaluation/        # metrics.py, plots.py
+│
+├── scripts/
+│   ├── 01_prepare_data.py      # Load → clean → align → pvlib → save
+│   ├── 02_build_features.py    # Aggregate → engineer features → save
+│   ├── 03_train.py             # Split → train XGBoost DMS → save
+│   └── 04_evaluate.py          # Predict → metrics → plots
+│
+├── notebooks/             # Exploratory analysis (Jupyter)
+├── tests/                 # pytest unit tests
+└── results/
+    ├── figures/           # Generated plots
+    └── metrics/           # CSV metric tables
+```
+
+---
+
+## Quick Start
+
+### 1. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Place data files
+
+```
+data/raw/Smartgrid lab solar PV data.csv
+data/external/solcast_weather_data_2020.csv
+data/external/solcast_weather_data_2021.csv
+data/external/solcast_weather_data_2022.csv
+data/external/solcast_weather_data_2023_end.csv
+```
+
+### 3. Run the pipeline
+
+```bash
+# Step 1: Load, align, clean, simulate
+python scripts/01_prepare_data.py
+
+# Step 2: Build the hourly feature matrix
+python scripts/02_build_features.py
+
+# Step 3: Train XGBoost DMS models
+python scripts/03_train.py
+
+# Step 4: Evaluate and generate plots
+python scripts/04_evaluate.py
+```
+
+Results are written to `results/figures/` and `results/metrics/`.
+
+---
+
+## Key Design Decisions
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Primary irradiance source | Solcast (satellite) | Higher spatial/temporal resolution than NASA POWER; site-specific |
+| Physics model | pvlib PVWatts | Interpretable, no module database required, appropriate for system-level forecasting |
+| ML strategy | Direct Multi-Step (DMS) | 24 independent models; no error propagation vs recursive; well-suited to periodic solar data |
+| Feature resolution | 5-min features → hourly targets | Preserves sub-hourly cloud information in features while keeping the forecast output practical for dispatch |
+| Target variable | `pv_ac_W` (AC bus reading) | Most reliable aggregate; includes all 3 sub-arrays; cross-repo compatible |
+| Cross-repo naming | Identical to `solar-generation-forecasting` | Allows shared evaluation notebooks and metric comparison |
+
+---
+
+## Evaluation Metrics
+
+Computed per horizon (h+1 to h+24) and as a mean:
+
+| Metric | Unit | Description |
+|---|---|---|
+| RMSE | W | Root mean squared error |
+| MAE | W | Mean absolute error |
+| MBE | W | Mean bias error (positive = over-prediction) |
+| MAPE | % | Mean absolute percentage error (daytime only) |
+| nRMSE | % | RMSE normalised by mean observed power |
+| R² | — | Coefficient of determination |
+
+Baselines: persistence (ŷ = y(t)) and same-day-yesterday (ŷ = y(t−24+h)).
+
+---
+
+## Extending This Repository
+
+### Direction A: Hourly microgrid optimisation (implemented)
+The current pipeline produces 24 hourly forecasts for day-ahead scheduling.
+
+### Direction B: High-resolution 5-min forecasting
+The 5-minute aligned dataset in `data/interim/` is preserved for sub-hourly
+modelling.  To extend:
+1. Skip the aggregation step in `02_build_features.py`.
+2. Adjust lag depths to 5-min steps (e.g. lag_5min, lag_60min).
+3. Train a model for 288 steps ahead (5-min × 24 hours).
+4. Optionally add Himawari cloud-motion velocity (CMV) features when available.
+
+---
+
+## Related Repositories
+
+- **[solar-generation-forecasting](https://github.com/NethminiRathnayake/solar-generation-forecasting)**
+  — NASA POWER-based pipeline for the same site.  Compatible evaluation
+  metrics and feature naming allow direct comparison between data sources.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

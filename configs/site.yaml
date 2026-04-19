@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Site Configuration — University of Moratuwa Solar PV Plant, Sri Lanka
+# ─────────────────────────────────────────────────────────────────────────────
+# Coordinates confirmed from the NASA POWER sister-repository (solar-generation-
+# forecasting).  pvlib physical parameters are preliminary estimates; update
+# with verified nameplate data when available from site metadata.
+
+site:
+  name: "University of Moratuwa"
+  latitude: 6.7912           # 6° 47′ 28.3″ N
+  longitude: 79.9005         # 79° 54′ 1.8″ E
+  timezone: "Asia/Colombo"   # UTC+05:30, no DST
+  elevation_m: 20            # approximate, m above sea level
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PV System Physical Parameters
+# ─────────────────────────────────────────────────────────────────────────────
+# System layout:
+#   - 3 sub-arrays (System 1 / System 2 / System 3)
+#   - System 1: 3 inverters (1.1, 1.2, 1.3), rated ~90 kWp DC
+#   - System 2: 2 inverters (2.1, 2.2), rated ~46 kWp DC
+#   - System 3: 3 inverters (3.1, 3.2, 3.3), rated ~195 kWp DC
+#   - Total AC peak observed: ~295 kW
+#   - DC nameplate (estimated at DC/AC ratio 1.18): ~350 kWp
+#
+# NOTE: Exact nameplate capacity, module model, and inverter model are not
+#       available in the dataset.  Parameters below are engineering estimates
+#       derived from observed peak output and standard Sri Lankan installation
+#       practice.  Replace with verified values when available.
+
+  pv_system:
+    capacity_kwp: 350.0        # estimated DC nameplate; replace when verified
+    tilt_deg: 10               # fixed tilt; optimal ~7° at 6.8°N latitude
+    azimuth_deg: 180           # 180° = south-facing (northern hemisphere standard)
+    module_type: "crystalline" # pvlib temperature model parameter set
+    # PVWatts model parameters
+    gamma_pdc: -0.0037         # power temperature coefficient (1/°C); ~-0.37%/°C
+    pdc0_kw: 350.0             # DC nameplate power at STC (kW)
+    eta_inv_nom: 0.96          # nominal inverter efficiency
+    # Cell temperature model (Faiman open-rack crystalline silicon defaults)
+    temp_model_params:
+      u0: 25.0
+      u1: 6.84

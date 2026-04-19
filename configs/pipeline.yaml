@@ -1,0 +1,100 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipeline Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── File paths (relative to project root) ────────────────────────────────────
+paths:
+  raw_local:    "data/raw/Smartgrid lab solar PV data.csv"
+  external_solcast_dir: "data/external/"
+  interim_5min: "data/interim/aligned_5min.parquet"
+  processed_hourly: "data/processed/feature_matrix_hourly.parquet"
+  train_set:    "data/processed/train.parquet"
+  val_set:      "data/processed/val.parquet"
+  test_set:     "data/processed/test.parquet"
+  models_dir:   "models/"
+  figures_dir:  "results/figures/"
+  metrics_dir:  "results/metrics/"
+  # Open-Meteo historical NWP data (produced by scripts/00_download_nwp_history.py)
+  nwp_history:  "data/external/nwp_history.parquet"
+
+# ── Data ingestion ────────────────────────────────────────────────────────────
+data:
+  # Column name in raw local PV file that maps to the forecast target
+  local_pv_target_col: "PV Hybrid Plant - PV SYSTEM - PV - Power Total (W)"
+  local_pv_datetime_col: "datetime"
+  local_pv_timezone: "Asia/Colombo"
+
+  # Solcast file settings
+  solcast_datetime_col: "period_end"      # UTC-aware timestamp
+  solcast_period_col: "period"            # expected value: PT5M
+  solcast_expected_period: "PT5M"
+
+  # Timestamp convention: both datasets use period_end (end of 5-min window)
+  # Solcast UTC timestamps are converted to Asia/Colombo before merging.
+
+# ── Cleaning thresholds ───────────────────────────────────────────────────────
+cleaning:
+  # Inverter overflow sentinel (int16 max × 1000, from SCADA firmware)
+  overflow_sentinel_w: 32767000
+
+  # Physical plausibility bounds for the total plant AC output
+  pv_min_w: 0.0
+  pv_max_w: 400000.0         # 400 kW hard ceiling (well above 350 kWp DC)
+
+  # Nighttime: rows where clearsky GHI is below this threshold are expected zeros
+  clearsky_ghi_night_threshold_wm2: 5.0
+
+  # Short-gap linear interpolation: fill gaps up to this many 5-min steps
+  # 6 steps = 30 minutes; do not interpolate longer gaps
+  max_interpolation_steps: 6
+
+# ── Feature engineering switches ─────────────────────────────────────────────
+features:
+  # Irradiance columns to carry through from Solcast (5-min → hourly mean)
+  solcast_irradiance_cols:
+    - ghi
+    - dni
+    - dhi
+    - gti
+    - clearsky_ghi
+    - clearsky_dni
+    - clearsky_dhi
+    - cloud_opacity
+
+  # Meteorological columns (5-min → hourly mean)
+  solcast_met_cols:
+    - air_temp
+    - dewpoint_temp
+    - relative_humidity
+    - surface_pressure
+
+  # Whether to include solar position features (elevation, azimuth)
+  include_solar_position: true
+
+  # Lag depths at hourly resolution (hours before decision time t)
+  lag_hours: [1, 2, 3, 4, 5, 6, 24, 48, 168]
+
+  # Rolling window lengths for mean and std (hours)
+  rolling_windows: [6, 24]
+
+# ── NWP Forecast (Open-Meteo) ─────────────────────────────────────────────────
+# Free, no API key required.  https://open-meteo.com
+#
+# Training uses oracle (actual future Solcast values shifted back).
+# Live inference uses Open-Meteo NWP forecasts.
+forecast:
+  # NWP model — 'best_match' lets Open-Meteo pick the highest-skill model
+  # for Sri Lanka.  Alternatives: 'gfs_seamless', 'ecmwf_ifs025', 'icon_seamless'
+  nwp_model: "best_match"
+  weather_cols: [ghi, cloud_opacity, air_temp]
+  n_horizons: 24                    # must match model.forecasting.n_horizons
+  # Local cache for API responses (avoids repeated calls during development)
+  cache_dir: "data/external/forecast_cache"
+  cache_ttl_s: 1800                 # 30 minutes; set to 0 to always re-fetch
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+evaluation:
+  # Minimum observed power for MAPE calculation (avoids division by near-zero)
+  mape_min_w: 1000.0
+  # Daytime-only evaluation threshold (clearsky GHI, W/m²)
+  daytime_ghi_threshold_wm2: 10.0

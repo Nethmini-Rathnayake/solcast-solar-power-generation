@@ -205,3 +205,22 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project-specific: generated data and model artefacts
+data/interim/*.parquet
+data/interim/*.csv
+data/processed/*.parquet
+data/processed/*.csv
+results/figures/*.png
+results/figures/*.pdf
+results/metrics/*.csv
+results/metrics/*.json
+models/
+*.pkl
+*.joblib
+*.pt
+*.model
+
+# Logs
+logs/
+*.log
