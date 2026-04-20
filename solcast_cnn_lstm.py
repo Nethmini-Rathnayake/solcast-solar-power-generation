@@ -272,7 +272,32 @@ def make_sequences(
     return X, y, pd.DatetimeIndex(idx_list)
 
 
-# ── 6. Model Architecture ──────────────────────────────────────────────────────
+# ── 6. Horizon-weighted loss (Step 2) ─────────────────────────────────────────
+
+def horizon_weighted_mse(n_horizons: int = 24, max_weight: float = 2.5):
+    """MSE loss with a linear ramp of per-horizon weights.
+
+    Weight rises from 1.0 at h+1 to max_weight at h+24 and is
+    mean-normalised so the overall loss magnitude stays comparable
+    to plain MSE (no learning-rate adjustment required).
+
+    Args:
+        n_horizons:  number of output steps (default 24)
+        max_weight:  weight assigned to the last horizon (default 2.5)
+    """
+    weights = np.linspace(1.0, max_weight, n_horizons).astype(np.float32)
+    weights /= weights.mean()                          # keep loss scale stable
+    w_tensor = tf.constant(weights, dtype=tf.float32)  # shape (n_horizons,)
+
+    def loss_fn(y_true, y_pred):
+        sq_err = tf.square(y_pred - y_true)            # (batch, n_horizons)
+        return tf.reduce_mean(sq_err * w_tensor)        # scalar
+
+    loss_fn.__name__ = "horizon_weighted_mse"
+    return loss_fn
+
+
+# ── 7. Model Architecture ──────────────────────────────────────────────────────
 
 def build_cnn_lstm(
     seq_len: int,
@@ -323,6 +348,98 @@ def build_cnn_lstm(
     outputs = layers.Dense(n_horizons, name="forecast")(x)
 
     model = keras.Model(inputs, outputs, name="CNN_LSTM_Solar")
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
+        loss="mse",     # Step 2 horizon-weighted loss did not improve results; reverted
+        metrics=["mae"],
+    )
+    model.summary()
+    return model
+
+
+def build_attention_encoder_decoder(
+    seq_len: int,
+    n_features: int,
+    n_horizons: int,
+    cnn_filters: list[int]  = CFG["cnn_filters"],
+    cnn_kernel: int         = CFG["cnn_kernel"],
+    enc_units: int          = 128,
+    dec_units: int          = 128,
+    n_heads: int            = 4,
+    key_dim: int            = 64,
+    ff_dim: int             = 256,
+    dropout: float          = CFG["dropout"],
+    learning_rate: float    = CFG["learning_rate"],
+) -> keras.Model:
+    """CNN + BiLSTM Encoder with Multi-Head Cross-Attention decoder (Step 4).
+
+    Architecture
+    ------------
+    Input (batch, seq_len, n_features)
+      └─ Conv1D(64) + Conv1D(32) + MaxPooling1D       local pattern extraction
+      └─ BiLSTM(128, return_sequences=True)            encoder states: all timesteps
+      └─ MultiHeadAttention (4 heads)                  cross-attention over encoder
+           query  = last encoder hidden (batch, 1, 256)
+           key/value = all encoder states (batch, T, 256)
+           → attended context (batch, 1, 256)
+      └─ LayerNorm + residual + Feed-Forward           Transformer-style refinement
+      └─ Dense(ff_dim, relu) + Dropout
+      └─ Dense(n_horizons)                             MIMO: all 24 horizons
+
+    Why this helps h+24
+    -------------------
+    The attention layer can learn to assign high weight to encoder states
+    at t-24 (yesterday same hour) when forming the h+24 prediction, without
+    relying on the LSTM to carry that signal through 24 recurrent steps.
+    """
+    inputs = keras.Input(shape=(seq_len, n_features), name="input_seq")
+    x = inputs
+
+    # ── CNN: local temporal pattern extraction ────────────────────────────────
+    for i, filters in enumerate(cnn_filters):
+        x = layers.Conv1D(
+            filters=filters,
+            kernel_size=cnn_kernel,
+            padding="same",
+            activation="relu",
+            name=f"enc_conv_{i+1}",
+        )(x)
+    x = layers.MaxPooling1D(pool_size=2, name="enc_maxpool")(x)
+
+    # ── BiLSTM encoder: returns ALL hidden states ─────────────────────────────
+    enc_out = layers.Bidirectional(
+        layers.LSTM(enc_units, return_sequences=True),
+        name="enc_bilstm",
+    )(x)                                              # (batch, T//2, 2*enc_units)
+    enc_out = layers.Dropout(dropout, name="enc_dropout")(enc_out)
+
+    # ── Cross-Attention: query = last encoder state ───────────────────────────
+    # Last hidden state summarises "now"; attention finds the most relevant
+    # past timesteps (e.g. same hour yesterday) for each decode step.
+    query = enc_out[:, -1:, :]                        # (batch, 1, 2*enc_units)
+    attn_out = layers.MultiHeadAttention(
+        num_heads=n_heads,
+        key_dim=key_dim,
+        dropout=dropout,
+        name="cross_attention",
+    )(query=query, value=enc_out, key=enc_out)        # (batch, 1, 2*enc_units)
+
+    # Residual + LayerNorm (Transformer-style stabilisation)
+    attn_out = layers.Add(name="attn_residual")([query, attn_out])
+    attn_out = layers.LayerNormalization(name="attn_layernorm")(attn_out)
+
+    # Squeeze attended context to 1-D
+    ctx = layers.Flatten(name="ctx_flatten")(attn_out)   # (batch, 2*enc_units)
+
+    # ── Feed-forward decoder head ─────────────────────────────────────────────
+    x = layers.Dense(ff_dim, activation="relu", name="dec_ff1")(ctx)
+    x = layers.Dropout(dropout, name="dec_dropout")(x)
+    x = layers.Dense(ff_dim // 2, activation="relu", name="dec_ff2")(x)
+
+    # ── MIMO output: all horizons at once ─────────────────────────────────────
+    outputs = layers.Dense(n_horizons, name="forecast")(x)
+
+    model = keras.Model(inputs, outputs, name="AttentionEncoderDecoder_Solar")
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
         loss="mse",
@@ -645,6 +762,7 @@ _CORE_FEATURES = [
     # Irradiance / cloud
     "ghi", "dni", "dhi", "cloud_opacity",
     "ghi_clearsky_ratio", "clearness_index_hourly",
+    "clearsky_ghi",                             # deterministic clearsky GHI
     # Meteorological
     "air_temp", "relative_humidity", "surface_pressure", "dewpoint_temp",
     # Physics / pvlib clearsky model output
@@ -658,6 +776,10 @@ _CORE_FEATURES = [
     # Future-weather summaries
     "ghi_fcast_mean_24h", "ghi_fcast_max_24h",
     "total_irradiance_ahead", "daylight_hours_ahead",
+    # h+24 anchor features (Step 1 improvement)
+    "clearness_nwp_h24",     # ghi_fcast_h24 / clearsky_ghi_at_h+24  (normalised cloud index)
+    "pvlib_clearsky_h24",    # deterministic clearsky PV output at t+24
+    "air_temp_fcast_h24",    # NWP temperature at exact h+24 horizon
 ]
 # Add 24-horizon forecast columns
 _CORE_FEATURES += [f"ghi_fcast_h{h}"           for h in range(1, 25)]
@@ -685,6 +807,21 @@ def _add_lag_and_summary_features(df: pd.DataFrame, pv_col: str) -> pd.DataFrame
         df["total_irradiance_ahead"] = ghi_mat.sum(axis=1)
         df["daylight_hours_ahead"]   = (ghi_mat > 50).sum(axis=1).astype(float)
 
+    # ── Step 1: h+24 anchor features ─────────────────────────────────────────
+    # clearness_nwp_h24: ratio of NWP GHI forecast to deterministic clearsky GHI
+    # at t+24 — directly measures cloud attenuation at the forecast horizon.
+    # clearsky_ghi.shift(-24) is safe: clearsky is purely astronomical (no leakage).
+    if "clearsky_ghi" in df.columns and "ghi_fcast_h24" in df.columns:
+        clearsky_h24 = df["clearsky_ghi"].shift(-24).fillna(0).clip(lower=0)
+        df["clearness_nwp_h24"] = (
+            df["ghi_fcast_h24"] / (clearsky_h24 + 1e-6)
+        ).clip(0, 1.5).fillna(0)
+
+    # pvlib_clearsky_h24: deterministic clearsky PV power 24 h ahead — anchors
+    # the upper-bound prediction regardless of cloud cover forecast.
+    if "pvlib_ac_W" in df.columns:
+        df["pvlib_clearsky_h24"] = df["pvlib_ac_W"].shift(-24).fillna(0).clip(lower=0)
+
     return df
 
 
@@ -711,9 +848,9 @@ def load_parquet_splits(
     # ── Real LSTM feature matrix (val + test) ────────────────────────────────
     real = pd.read_parquet(_REAL_PATH)
     real["PowerOutput"] = real["pv_ac_W"] / 1000.0            # W → kW
-    # Real matrix already has lag/summary features; just ensure pv_lag24 exists
-    if "pv_lag24" not in real.columns:
-        real = _add_lag_and_summary_features(real, pv_col="pv_ac_W")
+    # Always run feature augmentation so Step-1 h+24 anchors are computed
+    # for both synthetic and real datasets.
+    real = _add_lag_and_summary_features(real, pv_col="pv_ac_W")
     real = real.dropna(subset=["PowerOutput", "pv_lag24"])
     print(f"Real data:       {len(real):,} rows  "
           f"({real.index[0].date()} → {real.index[-1].date()})")
@@ -799,7 +936,7 @@ def main() -> None:
 
     # ── Build model ────────────────────────────────────────────────────────────
     n_features = X_train.shape[2]
-    model = build_cnn_lstm(
+    model = build_cnn_lstm(                    # best model: Step 1 (83 features)
         seq_len=seq_len,
         n_features=n_features,
         n_horizons=n_horizons,
