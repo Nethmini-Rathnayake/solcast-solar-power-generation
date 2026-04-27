@@ -350,8 +350,8 @@ def build_cnn_lstm(
     model = keras.Model(inputs, outputs, name="CNN_LSTM_Solar")
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
-        loss="mse",     # Step 2 horizon-weighted loss did not improve results; reverted
-        metrics=["mae"],
+        loss="mae",     # MAE loss directly optimises the metric we report
+        metrics=["mse"],
     )
     model.summary()
     return model

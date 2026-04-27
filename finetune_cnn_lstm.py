@@ -163,8 +163,8 @@ print(f"Loading model from {MODEL_PATH} …")
 model = keras.models.load_model(MODEL_PATH, compile=False)
 model.compile(
     optimizer=keras.optimizers.Adam(learning_rate=FINETUNE_LR),
-    loss="mse",
-    metrics=["mae"],
+    loss="mae",
+    metrics=["mse"],
 )
 print(f"Fine-tuning LR: {FINETUNE_LR}  (10× lower than training)")
 
