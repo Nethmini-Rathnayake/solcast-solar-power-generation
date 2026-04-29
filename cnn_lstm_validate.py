@@ -1,5 +1,5 @@
 """
-validate_cnn_lstm.py
+cnn_lstm_validate.py
 ---------------------
 Independent validation of the CNN-LSTM R² = 0.9249 result.
 
@@ -59,7 +59,7 @@ for h in horizons:
 df_m = pd.DataFrame(rows).set_index("horizon")
 mean_row = df_m.mean(numeric_only=True).rename("MEAN")
 df_m = pd.concat([df_m, mean_row.to_frame().T])
-df_m.to_csv("results/validation_metrics_cnn_lstm.csv")
+df_m.to_csv("results/cnn_lstm_validation_metrics.csv")
 
 print(df_m[["RMSE","MAE","MBE","R2"]].round({"RMSE":2,"MAE":2,"MBE":2,"R2":4}).to_string())
 print(f"\n✓ Confirmed R² = {df_m.loc['MEAN','R2']:.4f}  "

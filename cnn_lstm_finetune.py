@@ -1,5 +1,5 @@
 """
-finetune_cnn_lstm.py
+cnn_lstm_finetune.py
 --------------------
 Fine-tune the trained CNN-LSTM on real val-set data to push ALL 12 months
 above R² = 0.90.
@@ -25,7 +25,7 @@ March (−0.047).  New approach:
 
 Run
 ---
-    python finetune_cnn_lstm.py
+    python cnn_lstm_finetune.py
 """
 
 from __future__ import annotations
@@ -86,8 +86,8 @@ with open(SCALER_TGT, "rb") as f:
     scaler_tgt: MinMaxScaler = pickle.load(f)
 
 # ── Feature list (must match training) ───────────────────────────────────────
-# Re-derive by importing helper from solcast_cnn_lstm
-_src = open("solcast_cnn_lstm.py").read().split("if __name__")[0]
+# Re-derive by importing helper from cnn_lstm_solcast
+_src = open("cnn_lstm_solcast.py").read().split("if __name__")[0]
 exec(_src, globals())   # brings _CORE_FEATURES, _add_lag_and_summary_features,
                         # make_sequences, _REAL_PATH, CFG, etc. into scope
 

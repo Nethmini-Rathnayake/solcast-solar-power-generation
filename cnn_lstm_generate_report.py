@@ -1,5 +1,5 @@
 """
-generate_cnn_lstm_report.py
+cnn_lstm_generate_report.py
 ---------------------------
 Generates a comprehensive PDF report for the CNN-LSTM solar PV
 forecasting approach.

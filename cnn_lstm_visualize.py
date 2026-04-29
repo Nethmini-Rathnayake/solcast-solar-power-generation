@@ -1,5 +1,5 @@
 """
-visualize_cnn_lstm.py
+cnn_lstm_visualize.py
 ---------------------
 Visualization suite for the CNN-LSTM solar PV forecasting results.
 
@@ -15,7 +15,7 @@ Generates 8 figures in results/figures/analysis/:
 
 Run
 ---
-    python visualize_cnn_lstm.py
+    python cnn_lstm_visualize.py
 """
 
 from __future__ import annotations

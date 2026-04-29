@@ -1,5 +1,5 @@
 """
-solcast_cnn_lstm.py
+cnn_lstm_solcast.py
 --------------------
 Standalone CNN-LSTM hybrid forecaster for 1-24h ahead solar PV prediction
 using Solcast weather data.
@@ -14,7 +14,7 @@ Architecture
 
 Run
 ---
-    python solcast_cnn_lstm.py
+    python cnn_lstm_solcast.py
 
 Outputs
 -------

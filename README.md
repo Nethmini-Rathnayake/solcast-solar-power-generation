@@ -284,10 +284,10 @@ Three improvements over the initial CNN-LSTM baseline drove the final accuracy:
 
 | Script | Purpose |
 |---|---|
-| `solcast_cnn_lstm.py` | Phase 1 — build and train the CNN-LSTM on synthetic data |
-| `finetune_cnn_lstm.py` | Phase 2/3 — progressive fine-tuning on real val set |
-| `validate_cnn_lstm.py` | Ensemble evaluation and per-horizon / monthly metrics |
-| `visualize_cnn_lstm.py` | Generate all analysis figures |
+| `cnn_lstm_solcast.py` | Phase 1 — build and train the CNN-LSTM on synthetic data |
+| `cnn_lstm_finetune.py` | Phase 2/3 — progressive fine-tuning on real val set |
+| `cnn_lstm_validate.py` | Ensemble evaluation and per-horizon / monthly metrics |
+| `cnn_lstm_visualize.py` | Generate all analysis figures |
 | `draw_methodology.py` | Produce the methodology pipeline diagram |
 
 ---
