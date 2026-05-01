@@ -32,15 +32,13 @@ warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
-import pickle
 from pathlib import Path
-from sklearn.metrics import r2_score, mean_absolute_error
 
 Path("data/processed").mkdir(parents=True, exist_ok=True)
 
 SEED      = 42
 rng       = np.random.default_rng(SEED)
-PDC0_KW   = 6.0        # system capacity (kW)
+PDC0_KW   = 350.0      # system capacity kWp (UoM microgrid, ~295 kW AC peak)
 DEGRAD    = 0.0075     # 0.75 %/yr linear degradation
 REF_YEAR  = 2020       # year degradation is measured from
 
@@ -53,9 +51,16 @@ pvlib_kw = df["pvlib_ac_W"].values / 1000.0
 
 # ── 2. Load PV_Logger actuals ─────────────────────────────────────────────────
 print("Loading PV_Logger actuals …")
-act = pd.read_csv("data/raw/PV_Logger - samples.csv",
-                  usecols=["sample_time_local", "site_power_w"])
-act["ts"]       = pd.to_datetime(act["sample_time_local"]).dt.tz_localize(None)
+COL_TIME = "datetime"
+COL_POWER = "PV Hybrid Plant - PV SYSTEM - PV - Power Total (W)"
+
+act = pd.read_csv("data/raw/Smartgrid lab solar PV data.csv",
+                  usecols=[COL_TIME, COL_POWER])
+
+# Rename them for easier use in the script
+act = act.rename(columns={COL_TIME: "ts", COL_POWER: "site_power_w"})
+
+act["ts"]       = pd.to_datetime(act["ts"]).dt.tz_localize(None)
 act["hour"]     = act["ts"].dt.floor("h")
 act["actual_kW"]= act["site_power_w"] / 1000.0
 hourly_act      = act.groupby("hour")["actual_kW"].mean()
@@ -69,78 +74,32 @@ act_rows = act_rows.dropna(subset=["actual_kW"])
 act_rows["residual_kW"] = act_rows["actual_kW"] - act_rows["pvlib_ac_W"] / 1000.0
 print(f"  Training pairs for residual correction: {len(act_rows)}")
 
-# ── 3. XGBoost residual correction ───────────────────────────────────────────
-print("\nTraining XGBoost residual correction …")
-from sklearn.ensemble import GradientBoostingRegressor as XGBRegressor
+# ── 3. Build synthetic target ─────────────────────────────────────────────────
+# Use pvlib output as Phase 1 training target (teaches physics / irradiance patterns).
+# Phase 2 fine-tuning on real Smartgrid lab measurements will adapt to actual system
+# behaviour — that step benefits far more from 7,895 real pairs than a residual
+# correction model with R²~0.34 (ERA5 is too coarse to capture site-level cloud detail).
+print("\nBuilding synthetic target from pvlib …")
+pv_synthetic = pvlib_kw.copy()
 
-RESID_FEATURES = [
-    "pvlib_ac_W", "ghi", "cloud_opacity", "clearness_index_hourly",
-    "air_temp", "relative_humidity", "surface_pressure",
-    "cos_solar_zenith", "solar_elevation_deg",
-    "hour_sin", "hour_cos", "month_sin", "month_cos",
-    "monsoon_sw", "monsoon_ne", "monsoon_inter1", "monsoon_inter2",
-]
-RESID_FEATURES = [c for c in RESID_FEATURES if c in act_rows.columns]
-
-X_resid = act_rows[RESID_FEATURES].fillna(0).values
-y_resid = act_rows["residual_kW"].values
-
-# Leave-one-day-out cross-validation (6 days → 6 folds)
-from sklearn.model_selection import LeaveOneGroupOut
-days = act_rows.index.date
-groups = pd.factorize(days)[0]
-logo = LeaveOneGroupOut()
-
-cv_actual, cv_pred = [], []
-for tr_idx, val_idx in logo.split(X_resid, y_resid, groups):
-    xgb = XGBRegressor(
-        n_estimators=200, max_depth=4, learning_rate=0.05,
-        subsample=0.8, random_state=SEED,
-    )
-    xgb.fit(X_resid[tr_idx], y_resid[tr_idx])
-    pred_resid = xgb.predict(X_resid[val_idx])
-    pred_kw    = act_rows["pvlib_ac_W"].values[val_idx]/1000 + pred_resid
-    cv_actual.extend(act_rows["actual_kW"].values[val_idx].tolist())
-    cv_pred.extend(np.clip(pred_kw, 0, PDC0_KW*1.1).tolist())
-
-cv_r2  = r2_score(cv_actual, cv_pred)
-cv_mae = mean_absolute_error(cv_actual, cv_pred)
-print(f"  LOGO-CV  R²={cv_r2:.4f}  MAE={cv_mae:.3f} kW  ({cv_mae/PDC0_KW*100:.1f}% rated)")
-
-# Retrain on all actuals for the full-history correction
-xgb_final = XGBRegressor(
-    n_estimators=200, max_depth=4, learning_rate=0.05,
-    subsample=0.8, random_state=SEED,
-)
-xgb_final.fit(X_resid, y_resid)
-
-with open("xgb_residual_openmeteo.pkl", "wb") as f:
-    pickle.dump(xgb_final, f)
-print("  Saved → xgb_residual_openmeteo.pkl")
-
-# ── 4. Apply residual correction to full history ──────────────────────────────
-print("\nApplying residual correction to full history …")
-X_full = df[RESID_FEATURES].fillna(0).values
-resid_pred = xgb_final.predict(X_full)
-pv_corrected_kw = np.clip(pvlib_kw + resid_pred, 0, PDC0_KW * 1.15)
-
-# Override with actual measurements where available
+# Override with actual measurements where available (real > synthetic)
+n_overridden = 0
 for ts, val in hourly_act.items():
-    if ts in df.index:
-        idx = df.index.get_loc(ts)
-        pv_corrected_kw[idx] = val
+    if np.isnan(val):
+        continue
+    ts_n = ts if ts.tzinfo is None else ts.tz_localize(None)
+    if ts_n in df.index:
+        pv_synthetic[df.index.get_loc(ts_n)] = val
+        n_overridden += 1
 
-print(f"  Corrected PV: max={pv_corrected_kw.max():.2f} kW  "
-      f"mean(day)={pv_corrected_kw[pv_corrected_kw>0.1].mean():.2f} kW")
-
-# Step 5 (stochastic disturbances) skipped — keeping clean corrected data for later verification.
-pv_synthetic = pv_corrected_kw.copy()
-print(f"  Using corrected PV (no disturbances): max={pv_synthetic.max():.2f} kW")
+pv_synthetic = np.nan_to_num(pv_synthetic, nan=0.0)
+print(f"  pvlib range:      0 – {pvlib_kw.max():.1f} kW")
+print(f"  Actual overrides: {n_overridden} hours  (real measurements take precedence)")
+print(f"  Synthetic max:    {pv_synthetic.max():.1f} kW")
 
 # ── 6. Build final output dataframe ──────────────────────────────────────────
 print("\nBuilding synthetic dataset …")
 df_out = df.copy()
-df_out["pv_corrected_kW"]  = pv_corrected_kw
 df_out["pv_synthetic_kW"]  = pv_synthetic
 df_out["pv_ac_W"]          = pv_synthetic * 1000.0      # W — matches CNN-LSTM target col
 df_out["PowerOutput"]      = pv_synthetic               # kW
@@ -162,5 +121,5 @@ print(f"  Synthetic:        {len(synth_rows):,}  (OM + pvlib + residual + distur
 print(f"  Date range:       {df_out.index.min().date()} → {df_out.index.max().date()}")
 print(f"  Max PV output:    {df_out['pv_synthetic_kW'].max():.2f} kW")
 print(f"  Capacity factor:  {df_out[df_out['pv_synthetic_kW']>0]['pv_synthetic_kW'].mean()/PDC0_KW:.3f} mean (daytime)")
-print(f"\nResidual correction CV: R²={cv_r2:.4f}  MAE={cv_mae:.3f} kW")
+print(f"  Real actuals embedded: {n_overridden} hours (Phase 2 fine-tuning will use these)")
 print("Ready for CNN-LSTM training.")
