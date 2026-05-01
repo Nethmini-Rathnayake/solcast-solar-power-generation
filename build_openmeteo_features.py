@@ -33,13 +33,13 @@ import pvlib
 
 warnings.filterwarnings("ignore")
 
-# ── Site config ───────────────────────────────────────────────────────────────
-LAT       = 6.77
-LON       = 79.88
-ALT       = 20          # metres (from site.yaml)
+# ── Site config — University of Moratuwa microgrid (295 kW AC peak) ──────────
+LAT       = 6.7912
+LON       = 79.9005
+ALT       = 8           # metres
 TZ        = "Asia/Colombo"
-PDC0      = 6000.0      # W — 6 kWp system
-GAMMA     = -0.0037
+PDC0      = 350_000.0   # W — 350 kWp DC (3 sub-arrays × 8 inverters, ~295 kW AC peak)
+GAMMA     = -0.004
 ETA_INV   = 0.96
 TILT      = 10
 AZIMUTH   = 180
@@ -170,24 +170,26 @@ df["air_temp_fcast_h24"] = ath24
 # ── Step 4: Lag features ──────────────────────────────────────────────────────
 print("Building lag features …")
 
-# Use PV_Logger actuals where available, else use pvlib_ac_W as proxy
+# Use Smartgrid lab actuals (real UoM measurements) where available
 pv_actual = pd.Series(dtype=float)
 try:
-    act = pd.read_csv("data/raw/PV_Logger - samples.csv",
-                      usecols=["sample_time_local", "site_power_w"])
-    act["ts"]   = pd.to_datetime(act["sample_time_local"]).dt.tz_localize(None)
-    act["hour"] = act["ts"].dt.floor("h").dt.tz_localize(TZ)
-    act["kw"]   = act["site_power_w"] / 1000.0
+    COL_PWR = "PV Hybrid Plant - PV SYSTEM - PV - Power Total (W)"
+    act = pd.read_csv("data/raw/Smartgrid lab solar PV data.csv",
+                      usecols=["datetime", COL_PWR])
+    act["ts"]   = pd.to_datetime(act["datetime"]).dt.tz_localize(None)
+    act["hour"] = act["ts"].dt.floor("h")
+    act["kw"]   = act[COL_PWR] / 1000.0
     pv_actual   = act.groupby("hour")["kw"].mean()
-    print(f"  PV_Logger actuals loaded: {len(pv_actual)} hours")
+    print(f"  Smartgrid lab actuals loaded: {len(pv_actual)} hours")
 except Exception as e:
-    print(f"  PV_Logger actuals not available ({e}), using pvlib proxy for lags")
+    print(f"  Smartgrid lab actuals not available ({e}), using pvlib proxy for lags")
 
 # pv_lag24 / pv_lag48 — use actual where available, pvlib otherwise
-pv_series = df["pvlib_ac_W"] / 1000.0   # proxy
+pv_series = df["pvlib_ac_W"] / 1000.0   # proxy (kW)
 for ts, val in pv_actual.items():
-    if ts in pv_series.index:
-        pv_series.at[ts] = val
+    ts_naive = ts if ts.tzinfo is None else ts.tz_localize(None)
+    if ts_naive in pv_series.index:
+        pv_series.at[ts_naive] = val
 
 df["pv_lag24"] = pv_series.shift(24).fillna(0).values
 df["pv_lag48"] = pv_series.shift(48).fillna(0).values

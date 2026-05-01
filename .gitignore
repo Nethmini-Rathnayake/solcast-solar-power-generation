@@ -224,3 +224,4 @@ models/
 # Logs
 logs/
 *.log
+results/forecast_history.jsonl
